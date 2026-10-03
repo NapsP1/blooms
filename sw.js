@@ -1,6 +1,6 @@
 // Keeps Bloom working offline. Network first so updates show up right away,
 // falling back to the cached copy when there's no connection.
-const CACHE = 'bloom-v16';
+const CACHE = 'bloom-v17';
 const ASSETS = [
   './',
   'index.html',
@@ -16,7 +16,8 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)));
+  // 'reload' skips the browser's saved copies, so a new version installs the newest files.
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS.map((a) => new Request(a, { cache: 'reload' })))));
   self.skipWaiting();
 });
 
@@ -31,8 +32,10 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== location.origin) return;
+  // 'no-cache' asks GitHub whether the file changed instead of reusing a copy that can be
+  // up to 10 minutes old. When offline, the saved copy below is used.
   e.respondWith(
-    fetch(req)
+    fetch(new Request(req.url, { cache: 'no-cache', credentials: 'same-origin' }))
       .then((res) => {
         if (res.ok) {
           const copy = res.clone();
