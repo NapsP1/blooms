@@ -52,6 +52,10 @@
       favAff: [],     // saved affirmation texts (with {name} placeholders)
       bg: { type: 'floral', color: 'blush', veil: 0.45 }, // background: 'floral' | 'solid' | 'photo'
       theme: 'auto',  // 'auto' follows the phone, or 'light' / 'dark'
+      medals: {},     // { 'habit-0': 'YYYY-MM-DD', ... } medal id -> date earned (kept forever)
+      routines: { morning: [], night: [] }, // steps: { id, name, emoji, tiny }
+      routineLog: {}, // { 'YYYY-MM-DD': { morning: { steps: { stepId: 'full'|'tiny' }, complete } } }
+      dismissedTips: [], // habit-stacking ideas she tapped "Not for me" on
       // name: undefined until she answers the "what should we call you" prompt ('' = skipped)
       // affSeed: random number that gives each person her own affirmation order
     };
@@ -193,6 +197,8 @@
 
     return `
       ${affirmationCard(now)}
+
+      ${routineTodayCard(now)}
 
       <section class="card hero">
         <p class="hero-num"><strong>${n}</strong> of ${total} habits done</p>
@@ -367,6 +373,9 @@
     const grid = state.habits.map((h) => `
       <span class="gname">${esc(h.emoji)} ${esc(h.name)}</span>
       ${keys.map((k) => `<span class="dot ${(state.habitLog[k] || []).includes(h.id) ? 'on' : ''} ${k > todayK ? 'future' : ''}"></span>`).join('')}`
+    ).join('') + Object.keys(ROUTINES).filter((r) => state.routines[r].length).map((r) => `
+      <span class="gname">${ROUTINES[r].icon} ${ROUTINES[r].label} routine</span>
+      ${keys.map((k) => `<span class="dot ${routineGet(r, k).complete ? 'on' : ''} ${k > todayK ? 'future' : ''}"></span>`).join('')}`
     ).join('');
 
     const dayRows = days.map((d, i) => {
@@ -383,6 +392,10 @@
     }).join('');
 
     return `
+      <button class="back" data-click="back">‹ Back</button>
+
+      ${ui.weekOffset === 0 ? medalsSummary() : ''}
+
       <div class="wnav">
         <button class="arrow" data-click="wnav" data-id="-1" aria-label="Previous week">‹</button>
         <b>${label}</b>
@@ -399,7 +412,7 @@
 
       <section class="card">
         <div class="card-h"><h2>Habit tracker</h2></div>
-        ${state.habits.length ? `<div class="grid">${head}${grid}</div>` : '<p class="empty">Add habits on the Today tab to see them here.</p>'}
+        ${grid ? `<div class="grid">${head}${grid}</div>` : '<p class="empty">Add habits on the Today tab, or routines on the Seeds tab, to see them here.</p>'}
       </section>
 
       <section class="card">
@@ -849,7 +862,9 @@
           <div><b>@${esc(state.username)}</b><p class="small muted">${state.name ? esc(state.name) : 'No first name yet'}</p></div>
         </div>
         <div class="profile-actions">
-          ${inSettings ? '' : '<button class="chip" data-click="open-settings">⚙️ Settings</button>'}
+          ${inSettings ? '' : `<button class="chip" data-click="open-week">📅 My week</button>
+            <button class="chip" data-click="open-medals">🏅 Medals</button>
+            <button class="chip" data-click="open-settings">⚙️ Settings</button>`}
           <button class="chip" data-click="edit-name">${state.name ? 'Change first name' : 'Add first name'}</button>
           <button class="chip" data-click="feedback" aria-expanded="${ui.showFeedback}">💌 Send feedback</button>
           <button class="chip danger" data-click="sign-out">Sign out</button>
@@ -866,9 +881,585 @@
       </section>`;
   }
 
+  // ---------- Seeds: morning & night routines ----------
+  const ROUTINES = { morning: { label: 'Morning', icon: '☀️' }, night: { label: 'Night', icon: '🌙' } };
+  const STEP_EMOJI = ['✨', '💧', '🦷', '🧴', '💊', '🚿', '👗', '👟', '🛏️', '🧘‍♀️', '🍳', '☕', '📝', '☀️', '📵', '📖', '🧺', '🎒', '🙏', '🍵', '😴', '🎧', '🐾'];
+
+  // [emoji, name, tiny version]
+  const TEMPLATES = {
+    morning: [
+      {
+        name: 'Easy start', blurb: 'Gentle and quick. Good for low-energy mornings.',
+        steps: [
+          ['💧', 'Drink a glass of water', 'Take a few sips'],
+          ['🦷', 'Brush teeth', 'Rinse with mouthwash'],
+          ['💊', 'Take my vitamins or meds', ''],
+          ['🧴', 'Wash face and skincare', 'Splash water on my face'],
+          ['👗', 'Get dressed', 'Change into one fresh item'],
+          ['📝', 'Write my top 3 for today', 'Write just one thing'],
+        ],
+      },
+      {
+        name: 'Move & glow', blurb: 'Movement and sunlight to wake your brain up.',
+        steps: [
+          ['🛏️', 'Make the bed', 'Pull up the covers'],
+          ['💧', 'Drink a glass of water', 'Take a few sips'],
+          ['☀️', 'Open the curtains and get some sunlight', 'Open one curtain'],
+          ['🧘‍♀️', 'Stretch', 'One big stretch'],
+          ['🚿', 'Shower', 'Wash face and freshen up'],
+          ['🍳', 'Eat breakfast', 'Grab something with protein'],
+        ],
+      },
+    ],
+    night: [
+      {
+        name: 'Wind down', blurb: 'A calm, screen-free bedtime.',
+        steps: [
+          ['📵', 'Put my phone on the charger across the room', 'Put it face down'],
+          ['🧴', 'Wash face and skincare', 'Use a face wipe'],
+          ['🦷', 'Brush teeth', 'Rinse with mouthwash'],
+          ['👗', "Set out tomorrow's clothes", 'Pick just the top'],
+          ['📖', 'Read in bed', 'Read one page'],
+          ['😴', 'Lights out', ''],
+        ],
+      },
+      {
+        name: 'Reset & rest', blurb: 'Set tomorrow-you up for an easier morning.',
+        steps: [
+          ['🧺', '10-minute tidy', 'Clear one surface'],
+          ['🎒', 'Put my bag and keys by the door', 'Keys by the door'],
+          ['📝', "Write tomorrow's top 3", 'Write one thing'],
+          ['🍵', 'Make a caffeine-free tea', ''],
+          ['🚿', 'Shower or bath', 'Wash my face'],
+          ['🙏', 'Think of 3 good things from today', 'Just one good thing'],
+        ],
+      },
+    ],
+  };
+
+  // Habit-stacking ideas. "anchor" words are looked for in her step names; the new habit goes right after
+  // that step. anchor: null means it goes first, before the routine starts. "skip" words mean she already has it.
+  const STACKS = [
+    { id: 'm-water-wake', when: 'morning', anchor: null, lead: 'Right after I get out of bed', add: ['💧', 'Drink a glass of water', 'Take a few sips'], skip: ['water', 'drink'], why: 'Keep a full bottle on your nightstand so it is the first thing you see.' },
+    { id: 'm-meds-teeth', when: 'morning', anchor: ['brush', 'teeth'], add: ['💊', 'Take my vitamins or meds', ''], skip: ['vitamin', 'med', 'pill', 'supplement'], why: 'Keep them right next to your toothbrush. Seeing them is half the battle.' },
+    { id: 'm-water-coffee', when: 'morning', anchor: ['coffee'], add: ['💧', 'Drink a glass of water while the coffee brews', 'Take a few sips'], skip: ['water'], why: 'Waiting time becomes a quick win instead of a moment to get distracted.' },
+    { id: 'm-top3-coffee', when: 'morning', anchor: ['coffee', 'tea', 'breakfast'], add: ['📝', 'Write my top 3 for today', 'Write just one thing'], skip: ['top 3', 'plan', 'list', 'journal'], why: 'Picking your top 3 early gives your day a clear starting point.' },
+    { id: 'm-sun-bed', when: 'morning', anchor: ['bed'], add: ['☀️', 'Open the curtains and get some sunlight', 'Open one curtain'], skip: ['sun', 'curtain', 'outside'], why: 'Morning light helps set your body clock, which can make waking up easier.' },
+    { id: 'm-stretch-water', when: 'morning', anchor: ['water', 'drink'], add: ['🧘‍♀️', 'Stretch for 2 minutes', 'One big stretch'], skip: ['stretch', 'yoga'], why: 'Short movement wakes your brain up, and 2 minutes is easy to start.' },
+    { id: 'm-spf-skincare', when: 'morning', anchor: ['skincare', 'face', 'moistur'], add: ['🧴', 'Put on sunscreen', ''], skip: ['spf', 'sunscreen'], why: 'Stacked onto skincare you already do, it becomes one smooth motion.' },
+    { id: 'm-moist-shower', when: 'morning', anchor: ['shower'], add: ['🧴', 'Moisturize right after', ''], skip: ['skincare', 'moistur', 'lotion'], why: 'Do it while you are still in the bathroom, so you don’t have to remember to come back.' },
+    { id: 'm-shoes-dressed', when: 'morning', anchor: ['dress', 'clothes', 'outfit'], add: ['👟', 'Put my shoes on', ''], skip: ['shoe'], why: 'Shoes on tells your brain you’re ready to go and makes leaving easier.' },
+    { id: 'n-phone-first', when: 'night', anchor: null, lead: 'When I start winding down', add: ['📵', 'Put my phone on the charger across the room', 'Put it face down'], skip: ['phone'], why: 'Scrolling is the biggest bedtime thief. Out of reach means out of mind.' },
+    { id: 'n-read-phone', when: 'night', anchor: ['phone'], add: ['📖', 'Read in bed', 'Read one page'], skip: ['read', 'book'], why: 'Swap scrolling for something calm right when the phone goes down.' },
+    { id: 'n-face-teeth', when: 'night', anchor: ['brush', 'teeth'], add: ['🧴', 'Wash my face', 'Use a face wipe'], skip: ['face', 'skincare'], why: 'Same sink, same moment, so one flows straight into the other.' },
+    { id: 'n-clothes-teeth', when: 'night', anchor: ['brush', 'teeth', 'skincare'], add: ['👗', "Set out tomorrow's clothes", 'Pick just the top'], skip: ['clothes', 'outfit'], why: 'Fewer decisions in the morning makes mornings much easier.' },
+    { id: 'n-bag-clothes', when: 'night', anchor: ['clothes', 'outfit'], add: ['🎒', 'Put my bag and keys by the door', 'Keys by the door'], skip: ['bag', 'keys'], why: 'A “launch pad” by the door means no frantic searching tomorrow.' },
+    { id: 'n-tidy-dinner', when: 'night', anchor: ['dinner', 'eat', 'dishes'], add: ['🧺', '10-minute tidy', 'Clear one surface'], skip: ['tidy', 'clean'], why: 'A small, clear finish line makes a chore much easier to start.' },
+    { id: 'n-top3-tidy', when: 'night', anchor: ['tidy', 'clean', 'bag'], add: ['📝', "Write tomorrow's top 3", 'Write one thing'], skip: ['top 3', 'plan', 'list'], why: 'Getting tomorrow out of your head helps your brain switch off.' },
+    { id: 'n-bottle-teeth', when: 'night', anchor: ['brush', 'teeth'], add: ['💧', 'Fill a water bottle for my nightstand', ''], skip: ['bottle', 'nightstand'], why: 'Tomorrow morning’s first habit is ready and waiting.' },
+    { id: 'n-good-bed', when: 'night', anchor: ['pajama', 'pyjama', 'read', 'lights'], add: ['🙏', 'Think of 3 good things from today', 'Just one good thing'], skip: ['gratitude', 'good thing', 'journal'], why: 'Ending on something good is a gentle way to quiet a busy mind.' },
+  ];
+
+  const currentRoutine = (now) => ui.routine || (now.getHours() >= 4 && now.getHours() < 15 ? 'morning' : 'night');
+  // A night routine finished after midnight (before 4am) still counts for the night before.
+  const routineDay = (r, now) => dkey(r === 'night' && now.getHours() < 4 ? addDays(now, -1) : now);
+  const routineGet = (r, k) => (state.routineLog[k] || {})[r] || { steps: {}, complete: false };
+  const makeStep = ([emoji, name, tiny]) => ({ id: uid(), emoji, name, tiny: tiny || '' });
+
+  // Records a step as done ('full' or 'tiny') or not done (null). Returns true if that finished the routine.
+  function markStep(r, stepId, how) {
+    const k = routineDay(r, new Date());
+    const day = state.routineLog[k] || (state.routineLog[k] = {});
+    const entry = day[r] || (day[r] = { steps: {}, complete: false });
+    if (how) entry.steps[stepId] = how;
+    else delete entry.steps[stepId];
+    const was = entry.complete;
+    entry.complete = state.routines[r].length > 0 && state.routines[r].every((s) => entry.steps[s.id]);
+    return !was && entry.complete;
+  }
+
+  function routineStreak(r, now) {
+    const days = Object.keys(state.routineLog)
+      .filter((k) => state.routineLog[k][r] && state.routineLog[k][r].complete)
+      .map(dayNum);
+    return streakInfo(days, 1, dayNum(routineDay(r, now)));
+  }
+
+  function stackIdeas(r) {
+    const steps = state.routines[r];
+    const all = steps.map((s) => s.name.toLowerCase()).join(' | ');
+    const has = (words) => words.some((w) => all.includes(w));
+    const ideas = [];
+    STACKS.forEach((st) => {
+      if (st.when !== r || state.dismissedTips.includes(st.id) || has(st.skip)) return;
+      if (st.anchor === null) { ideas.push({ st, anchor: null }); return; }
+      const anchor = steps.find((s) => st.anchor.some((w) => s.name.toLowerCase().includes(w)));
+      if (anchor) ideas.push({ st, anchor });
+    });
+    // Ideas that build on what she already does come first.
+    return ideas.sort((a, b) => (a.anchor ? 0 : 1) - (b.anchor ? 0 : 1)).slice(0, 3);
+  }
+
+  function routineTips(r) {
+    const steps = state.routines[r];
+    const tips = [];
+    if (steps.length > 7) tips.push(`Your routine has ${steps.length} steps. Routines with 3–6 steps are much easier to start. Try moving a few to another time of day.`);
+    if (steps.length >= 2 && !steps.some((s) => s.tiny)) tips.push('Give your hardest step a tiny version. On low-energy days, the tiny version still counts as done.');
+    if (steps.length >= 3) tips.push('Make step one the easiest thing on your list. A small first win builds momentum for the rest.');
+    return tips.slice(0, 2);
+  }
+
+  function routineTodayCard(now) {
+    const r = currentRoutine(now);
+    const steps = state.routines[r];
+    if (!steps.length) return '';
+    const e = routineGet(r, routineDay(r, now));
+    const n = steps.filter((s) => e.steps[s.id]).length;
+    const meta = ROUTINES[r];
+    return `
+      <section class="card">
+        <div class="card-h">
+          <div><h2>${meta.icon} ${meta.label} routine</h2>
+            <p class="small muted">${e.complete ? 'Done for today 🌸' : `${n} of ${steps.length} steps`}</p></div>
+          ${e.complete ? '' : `<button class="btn" data-click="focus-start" data-id="${r}">▶ ${n ? 'Continue' : 'Start'}</button>`}
+        </div>
+        <div class="bar"><span style="width:${Math.round((n / steps.length) * 100)}%"></span></div>
+      </section>`;
+  }
+
+  function viewSeeds(now) {
+    const r = currentRoutine(now);
+    const meta = ROUTINES[r];
+    const steps = state.routines[r];
+    const entry = routineGet(r, routineDay(r, now));
+    const n = steps.filter((s) => entry.steps[s.id]).length;
+    const streak = routineStreak(r, now).current;
+    const editing = ui.edit.routine;
+    const word = r === 'morning' ? 'morning' : 'night';
+
+    const rows = steps.map((s, i) => {
+      const how = entry.steps[s.id];
+      const body = `<span class="emoji">${esc(s.emoji)}</span>
+        <div class="step-body"><b>${esc(s.name)}</b>${s.tiny ? `<span class="small muted">${how === 'tiny' ? 'Did the tiny version ✓' : `Tiny: ${esc(s.tiny)}`}</span>` : ''}</div>`;
+      if (editing) {
+        return `<div class="item step">${body}
+          <button class="mini" data-click="step-move" data-id="${s.id}:-1" ${i === 0 ? 'disabled' : ''} aria-label="Move ${esc(s.name)} up">↑</button>
+          <button class="mini" data-click="step-move" data-id="${s.id}:1" ${i === steps.length - 1 ? 'disabled' : ''} aria-label="Move ${esc(s.name)} down">↓</button>
+          <button class="del" data-click="del-step" data-id="${s.id}" aria-label="Delete ${esc(s.name)}">×</button></div>`;
+      }
+      return `<div class="item step ${how ? 'done' : ''}">
+        <button class="check" data-click="step-toggle" data-id="${s.id}" aria-pressed="${!!how}" aria-label="Mark ${esc(s.name)} done">${CHECK}</button>
+        ${body}
+        ${s.tiny && !how ? `<button class="chip tiny-btn" data-click="step-tiny" data-id="${s.id}">Tiny ✓</button>` : ''}
+      </div>`;
+    }).join('');
+
+    const templates = TEMPLATES[r].map((t, i) => `
+      <div class="tpl">
+        <div><b>${t.name}</b><p class="small muted">${t.blurb}</p></div>
+        <p class="tpl-steps" aria-hidden="true">${t.steps.map((s) => s[0]).join(' ')}</p>
+        <button class="chip strong" data-click="use-template" data-id="${i}">Use this routine</button>
+      </div>`).join('');
+
+    const ideas = stackIdeas(r).map(({ st, anchor }) => {
+      const lead = anchor ? `After I <b>${esc(anchor.name.charAt(0).toLowerCase() + anchor.name.slice(1))}</b>` : st.lead;
+      return `<div class="stack">
+        <p class="stack-line">${lead}, I will <b>${esc(st.add[1].charAt(0).toLowerCase() + st.add[1].slice(1))}</b>.</p>
+        <p class="small muted">${st.why}</p>
+        <div class="stack-actions">
+          <button class="chip strong" data-click="add-stack" data-id="${st.id}">+ Add to my routine</button>
+          <button class="link" data-click="dismiss-tip" data-id="${st.id}">Not for me</button>
+        </div>
+      </div>`;
+    }).join('');
+    const tips = routineTips(r).map((t) => `<p class="tip"><span aria-hidden="true">💡</span><span>${esc(t)}</span></p>`).join('');
+
+    return `
+      <div class="seg" role="group" aria-label="Routine">
+        <button data-click="routine" data-id="morning" aria-pressed="${r === 'morning'}">☀️ Morning</button>
+        <button data-click="routine" data-id="night" aria-pressed="${r === 'night'}">🌙 Night</button>
+      </div>
+
+      ${steps.length ? `
+        <section class="card hero">
+          <p class="hero-num"><strong>${n}</strong> of ${steps.length} steps done</p>
+          <div class="bar"><span style="width:${Math.round((n / steps.length) * 100)}%"></span></div>
+          <p class="small muted">${entry.complete ? `${meta.label} routine done. Well done! 🌸`
+            : streak ? `🔥 ${plural(streak, word)} in a row. Keep it growing!` : 'One step at a time. You’ve got this.'}</p>
+          ${entry.complete ? '' : `<button class="btn block" data-click="focus-start" data-id="${r}">▶ ${n ? 'Continue' : 'Start'} focus mode</button>`}
+        </section>` : `
+        <section class="card">
+          <div class="card-h"><div><h2>Plant your ${word} routine 🌱</h2>
+            <p class="small muted">A routine is a short list of steps you do in the same order every ${word}. Start with a template, or add your own steps below.</p></div></div>
+          <div class="tpls">${templates}</div>
+        </section>`}
+
+      <section class="card">
+        <div class="card-h"><h2>${meta.icon} ${meta.label} steps</h2>${steps.length ? editBtn('routine') : ''}</div>
+        <div class="list">${rows || `<p class="empty">No steps yet.</p>`}</div>
+        <form data-submit="add-step">
+          <div class="add">
+            <select name="emoji" aria-label="Step icon">${STEP_EMOJI.map((e) => `<option>${e}</option>`).join('')}</select>
+            <input name="sname" placeholder="${r === 'morning' ? 'e.g. Drink a glass of water' : 'e.g. Phone on the charger'}" maxlength="60" autocomplete="off" required aria-label="Step name">
+          </div>
+          <div class="add tight">
+            <input name="tiny" placeholder="Tiny version for hard days (optional)" maxlength="60" autocomplete="off" aria-label="Tiny version for hard days (optional)">
+          </div>
+          <button class="btn block">Add step</button>
+        </form>
+        ${steps.length ? `<button class="link tpl-link" data-click="toggle-templates">${ui.showTemplates ? 'Hide templates' : 'Browse templates'}</button>
+          ${ui.showTemplates ? `<div class="tpls">${templates}</div>` : ''}` : ''}
+      </section>
+
+      <section class="card">
+        <div class="card-h"><h2>🌱 Habit-stacking ideas</h2></div>
+        <p class="small muted stack-intro">Habit stacking links a new habit to one you already do: <b>“After I ___, I will ___.”</b> Your existing step becomes the reminder, so you don't have to remember it.</p>
+        <div class="list">${ideas || `<p class="empty">${steps.length ? 'No new ideas right now. Your routine is looking great!' : 'Add a few steps and ideas will appear here.'}</p>`}</div>
+        ${tips}
+      </section>`;
+  }
+
+  // ----- Focus mode: one step at a time -----
+  let focus = null; // { r, idx, celebrated }
+
+  function nextUndone(r, from) {
+    const steps = state.routines[r];
+    const e = routineGet(r, routineDay(r, new Date()));
+    let i = from;
+    while (i < steps.length && e.steps[steps[i].id]) i++;
+    return i;
+  }
+
+  function openFocus(r) {
+    if (!state.routines[r].length) return;
+    const first = nextUndone(r, 0);
+    focus = { r, idx: first < state.routines[r].length ? first : 0, celebrated: false };
+    renderFocus();
+    const btn = $('#focus [data-click="focus-done"]');
+    if (btn) btn.focus();
+  }
+
+  function closeFocus() { focus = null; renderFocus(); }
+
+  function renderFocus() {
+    let el = $('#focus');
+    if (!focus) {
+      if (el) el.remove();
+      document.body.classList.remove('focusing');
+      return;
+    }
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'focus';
+      el.className = 'focus';
+      el.setAttribute('role', 'dialog');
+      el.setAttribute('aria-modal', 'true');
+      el.setAttribute('aria-label', 'Focus mode');
+      document.body.appendChild(el);
+    }
+    document.body.classList.add('focusing');
+    const steps = state.routines[focus.r];
+    const meta = ROUTINES[focus.r];
+    const e = routineGet(focus.r, routineDay(focus.r, new Date()));
+    const top = (label) => `<div class="focus-top"><span class="aff-label">${meta.icon} ${label}</span>
+      <button class="focus-x" data-click="focus-close" aria-label="Close focus mode">×</button></div>`;
+
+    if (focus.idx >= steps.length) {
+      const done = steps.filter((s) => e.steps[s.id]).length;
+      const streak = routineStreak(focus.r, new Date()).current;
+      el.innerHTML = `${top(`${meta.label} routine`)}
+        <div class="focus-main">
+          <div class="focus-emoji">${e.complete ? '🌸' : '🌱'}</div>
+          <h2 class="focus-name">${e.complete ? `${meta.label} routine complete!` : 'You showed up, and that counts.'}</h2>
+          <p class="focus-tiny">${e.complete
+            ? (streak > 1 ? `That’s ${streak} ${focus.r === 'morning' ? 'mornings' : 'nights'} in a row. 🔥` : 'Every routine you finish helps it grow.')
+            : `You finished ${done} of ${steps.length} steps. Skipped steps are still on your list if you want to come back.`}</p>
+        </div>
+        <div class="focus-actions"><button class="btn block" data-click="focus-close">Close</button></div>`;
+      if (e.complete && !focus.celebrated) { focus.celebrated = true; petals(); }
+      return;
+    }
+
+    const s = steps[focus.idx];
+    el.innerHTML = `${top(`${meta.label} routine · Step ${focus.idx + 1} of ${steps.length}`)}
+      <div class="focus-dots" aria-hidden="true">${steps.map((x, i) => `<span class="${e.steps[x.id] ? 'past' : i === focus.idx ? 'now' : ''}"></span>`).join('')}</div>
+      <div class="focus-main">
+        <div class="focus-emoji" aria-hidden="true">${esc(s.emoji)}</div>
+        <h2 class="focus-name">${esc(s.name)}</h2>
+        ${s.tiny ? `<p class="focus-tiny">Hard day? Tiny version: <b>${esc(s.tiny)}</b></p>` : ''}
+      </div>
+      <div class="focus-actions">
+        <button class="btn block" data-click="focus-done">Done ✓</button>
+        ${s.tiny ? '<button class="chip block-chip" data-click="focus-tiny">I did the tiny version</button>' : ''}
+        <button class="link" data-click="focus-skip">Skip for now</button>
+      </div>`;
+  }
+
+  function focusAdvance(how) {
+    const s = state.routines[focus.r][focus.idx];
+    if (how) {
+      markStep(focus.r, s.id, how);
+      save();
+      render();
+    }
+    focus.idx = nextUndone(focus.r, focus.idx + 1);
+    renderFocus();
+    if (how) checkMedals();
+  }
+
+  // ---------- Medals ----------
+  const TIERS = [
+    { name: 'Seed', emoji: '🌱' },
+    { name: 'Sprout', emoji: '🌿' },
+    { name: 'Bud', emoji: '🌷' },
+    { name: 'Bloom', emoji: '🌸' },
+    { name: 'Bouquet', emoji: '💐' },
+  ];
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  const MEDAL_FAMILIES = [
+    {
+      id: 'habit', title: 'Habit streak', icon: '✅', streak: true, steps: [3, 7, 14, 30, 100], short: 'days',
+      now: (v) => `${plural(v, 'day')} in a row now`,
+      desc: (n) => `keep any habit going ${n} days in a row`,
+      done: (n) => `You kept a habit going ${n} days in a row.`,
+    },
+    {
+      id: 'water', title: 'Hydration streak', icon: '💧', streak: true, steps: [3, 7, 14, 30, 100], short: 'days',
+      now: (v) => `${plural(v, 'day')} in a row now`,
+      desc: (n) => `reach your water goal ${n} days in a row`,
+      done: (n) => `You reached your water goal ${n} days in a row. 💧`,
+    },
+    {
+      id: 'workout', title: 'Workout streak', icon: '💪', streak: true, steps: [2, 4, 8, 12, 26], short: 'wks',
+      now: (v) => `${plural(v, 'week')} in a row now`,
+      desc: (n) => `work out at least once a week for ${n} weeks in a row`,
+      done: (n) => `You worked out every week for ${n} weeks in a row. 💪`,
+    },
+    {
+      id: 'morning', title: 'Morning routine', icon: '☀️', streak: true, steps: [3, 7, 14, 30, 100], short: 'days',
+      now: (v) => `${plural(v, 'morning')} in a row now`,
+      desc: (n) => `finish your morning routine ${n} days in a row`,
+      done: (n) => `You finished your morning routine ${n} days in a row. ☀️`,
+    },
+    {
+      id: 'night', title: 'Night routine', icon: '🌙', streak: true, steps: [3, 7, 14, 30, 100], short: 'days',
+      now: (v) => `${plural(v, 'night')} in a row now`,
+      desc: (n) => `finish your night routine ${n} nights in a row`,
+      done: (n) => `You finished your night routine ${n} nights in a row. 🌙`,
+    },
+    {
+      id: 'goals', title: 'Goal getter', icon: '🎯', streak: false, steps: [3, 10, 25, 50, 100], short: 'goals',
+      now: (v) => `${v} completed`,
+      desc: (n) => `complete ${n} weekly or monthly goals`,
+      done: (n) => `You've completed ${n} goals.`,
+    },
+    {
+      id: 'budget', title: 'Budget boss', icon: '👛', streak: true, steps: [2, 4, 8, 12, 26], short: 'wks',
+      now: (v) => `${plural(v, 'week')} on budget in a row`,
+      desc: (n) => `stay within all your weekly budgets for ${n} weeks in a row`,
+      done: (n) => `You stayed within your weekly budgets ${n} weeks in a row.`,
+    },
+    {
+      id: 'savings', title: 'Savings star', icon: '🌟', streak: false, steps: [1, 2, 3, 5, 10], short: 'goals',
+      now: (v) => `${v} reached`,
+      desc: (n) => `reach ${plural(n, 'savings goal')}`,
+      done: (n) => `You've reached ${plural(n, 'savings goal')}. 🎉`,
+    },
+  ];
+  const MEDAL_TOTAL = MEDAL_FAMILIES.length * TIERS.length;
+  const medalId = (f, i) => `${f.id}-${i}`;
+  const earnedCount = () => MEDAL_FAMILIES.reduce((s, f) => s + f.steps.filter((n, i) => state.medals[medalId(f, i)]).length, 0);
+
+  const dayNum = (k) => { const [y, m, d] = k.split('-').map(Number); return Date.UTC(y, m - 1, d) / 864e5; };
+
+  // Longest run ever, and the run still going now (counting from this period or the one before).
+  function streakInfo(nums, step, nowNum) {
+    const sorted = [...new Set(nums)].sort((a, b) => a - b);
+    let best = 0;
+    let run = 0;
+    let prev = null;
+    for (const n of sorted) {
+      run = prev !== null && n - prev === step ? run + 1 : 1;
+      best = Math.max(best, run);
+      prev = n;
+    }
+    const set = new Set(sorted);
+    let current = 0;
+    let t = set.has(nowNum) ? nowNum : nowNum - step;
+    while (set.has(t)) { current++; t -= step; }
+    return { best, current };
+  }
+
+  function medalStats(now) {
+    const todayNum = dayNum(dkey(now));
+    const weekNum = (k) => dayNum(dkey(startOfWeek(parseKey(k))));
+    const thisWeek = weekNum(dkey(now));
+
+    let habit = { best: 0, current: 0 };
+    state.habits.forEach((h) => {
+      const days = Object.keys(state.habitLog).filter((k) => state.habitLog[k].includes(h.id)).map(dayNum);
+      const s = streakInfo(days, 1, todayNum);
+      habit = { best: Math.max(habit.best, s.best), current: Math.max(habit.current, s.current) };
+    });
+
+    const waterDays = Object.keys(state.water).filter((k) => state.water[k] >= state.waterGoal).map(dayNum);
+    const workoutWeeks = state.workouts.map((w) => weekNum(w.date));
+
+    // A finished week counts as "on budget" when she logged spending and stayed within every weekly budget.
+    const weekly = state.budgets.filter((b) => b.period === 'week');
+    const byWeek = {};
+    state.txns.filter((t) => t.type === 'expense').forEach((t) => {
+      const w = weekNum(t.date);
+      if (w < thisWeek) (byWeek[w] = byWeek[w] || []).push(t);
+    });
+    const onBudgetWeeks = weekly.length ? Object.keys(byWeek).map(Number).filter((w) =>
+      weekly.every((b) => total(byWeek[w].filter((t) => t.budgetId === b.id)) <= b.limit)) : [];
+
+    const goalsDone = state.goals.filter((g) => g.done).length;
+    const savingsReached = state.savings.filter((g) => savedSoFar(g) >= g.target).length;
+
+    return {
+      habit,
+      water: streakInfo(waterDays, 1, todayNum),
+      workout: streakInfo(workoutWeeks, 7, thisWeek),
+      morning: routineStreak('morning', now),
+      night: routineStreak('night', now),
+      goals: { best: goalsDone, current: goalsDone },
+      budget: streakInfo(onBudgetWeeks, 7, thisWeek),
+      savings: { best: savingsReached, current: savingsReached },
+    };
+  }
+
+  // Awards any medals she has newly reached and celebrates them.
+  function checkMedals() {
+    if (!state.username) return;
+    const stats = medalStats(new Date());
+    const fresh = [];
+    MEDAL_FAMILIES.forEach((f) => f.steps.forEach((n, i) => {
+      const id = medalId(f, i);
+      if (!state.medals[id] && stats[f.id].best >= n) {
+        state.medals[id] = dkey(new Date());
+        fresh.push({ f, i });
+      }
+    }));
+    if (!fresh.length) return;
+    save();
+    render();
+    celebrate(fresh);
+  }
+
+  const medalBadge = (i, earned, extra = '') =>
+    `<span class="medal t${i} ${earned ? '' : 'locked'} ${extra}" aria-hidden="true">${TIERS[i].emoji}</span>`;
+
+  function celebrate(fresh) {
+    fresh.sort((a, b) => b.i - a.i);
+    const { f, i } = fresh[0];
+    const wrap = document.createElement('div');
+    wrap.className = 'dialog-backdrop';
+    wrap.innerHTML = `<div class="dialog medal-card" role="dialog" aria-modal="true" aria-labelledby="medal-title">
+        ${medalBadge(i, true, 'big')}
+        <p class="aff-label">New medal unlocked</p>
+        <h2 id="medal-title">${f.title} · ${TIERS[i].name}</h2>
+        <p>${f.done(f.steps[i])}</p>
+        ${fresh.length > 1 ? `<p class="small muted">Plus ${plural(fresh.length - 1, 'more medal')}. See them all on your Medals page.</p>` : ''}
+        <button class="btn block" data-close>Keep blooming 🌸</button>
+      </div>`;
+    const close = () => { wrap.remove(); document.removeEventListener('keydown', onKey); };
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    wrap.addEventListener('click', (e) => { if (e.target === wrap || e.target.closest('[data-close]')) close(); });
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(wrap);
+    wrap.querySelector('[data-close]').focus();
+    petals();
+    if (navigator.vibrate) navigator.vibrate([20, 60, 20]);
+  }
+
+  // Falling pink petals (skipped for people who turn off motion).
+  function petals() {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const colors = ['#f6c4d0', '#eeaabb', '#f9d9e0', '#e3c3b3', '#fbe3e8', '#d98aa1'];
+    for (let n = 0; n < 36; n++) {
+      const p = document.createElement('span');
+      p.className = 'petal';
+      const size = 8 + Math.random() * 10;
+      p.style.cssText = `left:${Math.random() * 100}vw;width:${size}px;height:${size * 1.3}px;` +
+        `background:${colors[n % colors.length]};animation-duration:${2.6 + Math.random() * 2}s;` +
+        `animation-delay:${Math.random() * 0.8}s;--dx:${(Math.random() - 0.5) * 160}px;--rot:${Math.random() * 720 - 360}deg`;
+      document.body.appendChild(p);
+      setTimeout(() => p.remove(), 5500);
+    }
+  }
+
+  function medalsSummary() {
+    const recent = Object.entries(state.medals)
+      .map(([id, date]) => {
+        const [fid, i] = id.split('-');
+        const f = MEDAL_FAMILIES.find((x) => x.id === fid);
+        return f ? { f, i: Number(i), date } : null;
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.date.localeCompare(a.date) || b.i - a.i)
+      .slice(0, 5);
+    return `
+      <section class="card">
+        <div class="card-h"><div><h2>🏅 Medals</h2><p class="small muted">${earnedCount()} of ${MEDAL_TOTAL} earned</p></div>
+          <button class="link" data-click="open-medals">See all ›</button></div>
+        ${recent.length ? `<div class="medal-row">${recent.map(({ f, i }) => `<div class="medal-cell">
+            ${medalBadge(i, true)}<span>${f.icon} ${TIERS[i].name}</span></div>`).join('')}</div>`
+          : '<p class="empty">Earn your first medal by keeping a habit going 3 days in a row. 🌱</p>'}
+      </section>`;
+  }
+
+  function viewMedals(now) {
+    const stats = medalStats(now);
+    const earned = earnedCount();
+    const families = MEDAL_FAMILIES.map((f) => {
+      const val = f.streak ? stats[f.id].current : stats[f.id].best;
+      const next = f.steps.findIndex((n, i) => !state.medals[medalId(f, i)]);
+      const target = next >= 0 ? f.steps[next] : 0;
+      const pct = target ? Math.min(100, Math.round((val / target) * 100)) : 100;
+      return `
+        <section class="card">
+          <div class="card-h"><h2>${f.icon} ${f.title}</h2><span class="small muted">${f.now(val)}</span></div>
+          <div class="medal-row">
+            ${f.steps.map((n, i) => {
+              const got = !!state.medals[medalId(f, i)];
+              return `<div class="medal-cell">${medalBadge(i, got)}<span>${got ? TIERS[i].name : `${n} ${f.short}`}</span></div>`;
+            }).join('')}
+          </div>
+          ${next < 0 ? '<p class="cheer">Every medal earned. Amazing! 💐</p>' : `
+            <div class="progress-line medal-progress"><div class="bar"><span style="width:${pct}%"></span></div><span class="small muted">${val}/${target}</span></div>
+            <p class="small muted medal-next">Next: ${TIERS[next].emoji} ${TIERS[next].name}. ${f.desc(target).replace(/^./, (c) => c.toUpperCase())}.</p>`}
+        </section>`;
+    }).join('');
+    return `
+      <button class="back" data-click="back">‹ Back</button>
+      <section class="card">
+        <div class="card-h"><div><h2>Your medal garden</h2><p class="small muted">${earned} of ${MEDAL_TOTAL} earned</p></div></div>
+        <div class="bar"><span style="width:${Math.round((earned / MEDAL_TOTAL) * 100)}%"></span></div>
+        <p class="small muted tier-key">🌱 Seed → 🌿 Sprout → 🌷 Bud → 🌸 Bloom → 💐 Bouquet</p>
+      </section>
+      ${families}`;
+  }
+
   // ---------- Rendering ----------
-  const VIEWS = { today: viewToday, goals: viewGoals, workouts: viewWorkouts, money: viewMoney, week: viewWeek, settings: viewSettings };
-  const TITLES = { today: 'Today', goals: 'Goals', workouts: 'Workouts', money: 'Money', week: 'My week', settings: 'Settings' };
+  const VIEWS = {
+    today: viewToday, goals: viewGoals, workouts: viewWorkouts, money: viewMoney, seeds: viewSeeds,
+    week: viewWeek, settings: viewSettings, medals: viewMedals,
+  };
+  const TITLES = {
+    today: 'Today', goals: 'Goals', workouts: 'Workouts', money: 'Money', seeds: 'Seeds',
+    week: 'My week', settings: 'Settings', medals: 'Medals',
+  };
+  // Pages opened from the profile menu (they have a Back link instead of a tab).
+  const isSubPage = () => ['settings', 'medals', 'week'].includes(ui.tab);
+  function openPage(page) {
+    if (!isSubPage()) ui.prevTab = ui.tab;
+    ui.tab = page;
+    ui.showProfile = false;
+    render();
+    window.scrollTo(0, 0);
+  }
   if (!VIEWS[ui.tab]) ui.tab = 'today';
 
   function render() {
@@ -883,14 +1474,14 @@
     const btn = $('#profile-btn');
     btn.textContent = state.username[0].toUpperCase();
     btn.setAttribute('aria-expanded', String(ui.showProfile));
-    $('#view').innerHTML = (ui.showProfile && ui.tab !== 'settings' ? profileCard(false) : '') + VIEWS[ui.tab](now);
+    $('#view').innerHTML = (ui.showProfile && !isSubPage() ? profileCard(false) : '') + VIEWS[ui.tab](now);
     document.querySelectorAll('.tab').forEach((t) => {
       if (t.dataset.tab === ui.tab) t.setAttribute('aria-current', 'page');
       else t.removeAttribute('aria-current');
     });
   }
 
-  function commit() { save(); render(); }
+  function commit() { save(); render(); checkMedals(); }
 
   // ---------- Actions ----------
   const clicks = {
@@ -966,8 +1557,72 @@
       render();
       window.scrollTo(0, 0);
     },
+    'open-medals'() { openPage('medals'); },
+    'open-week'() { ui.weekOffset = 0; openPage('week'); },
+
+    // Seeds
+    routine(r) { ui.routine = r; ui.edit.routine = false; ui.showTemplates = false; render(); },
+    'step-toggle'(id) {
+      const r = currentRoutine(new Date());
+      const done = routineGet(r, routineDay(r, new Date())).steps[id];
+      const finished = markStep(r, id, done ? null : 'full');
+      if (!done && navigator.vibrate) navigator.vibrate(10);
+      commit();
+      if (finished) { toast(`${ROUTINES[r].label} routine complete! 🌸`); petals(); }
+    },
+    'step-tiny'(id) {
+      const r = currentRoutine(new Date());
+      const finished = markStep(r, id, 'tiny');
+      commit();
+      toast(finished ? `${ROUTINES[r].label} routine complete! 🌸` : 'Tiny version counts. Nice! 🌱');
+      if (finished) petals();
+    },
+    'step-move'(ref) {
+      const [id, dir] = ref.split(':');
+      const list = state.routines[currentRoutine(new Date())];
+      const i = list.findIndex((s) => s.id === id);
+      const j = i + Number(dir);
+      if (i < 0 || j < 0 || j >= list.length) return;
+      [list[i], list[j]] = [list[j], list[i]];
+      commit();
+    },
+    async 'del-step'(id) {
+      const r = currentRoutine(new Date());
+      const s = state.routines[r].find((x) => x.id === id);
+      if (!s || !(await ask(`Remove "${s.name}" from your ${r} routine?`, 'Remove'))) return;
+      state.routines[r] = state.routines[r].filter((x) => x.id !== id);
+      if (!state.routines[r].length) ui.edit.routine = false;
+      commit();
+    },
+    async 'use-template'(i) {
+      const r = currentRoutine(new Date());
+      const t = TEMPLATES[r][Number(i)];
+      if (state.routines[r].length && !(await ask(`Replace your ${r} steps with “${t.name}”?`, 'Replace'))) return;
+      state.routines[r] = t.steps.map(makeStep);
+      ui.showTemplates = false;
+      commit();
+      toast(`“${t.name}” planted. Edit any step to make it yours. 🌱`);
+      window.scrollTo(0, 0);
+    },
+    'toggle-templates'() { ui.showTemplates = !ui.showTemplates; render(); },
+    'add-stack'(id) {
+      const r = currentRoutine(new Date());
+      const idea = stackIdeas(r).find((x) => x.st.id === id);
+      if (!idea) return;
+      const list = state.routines[r];
+      const at = idea.anchor ? list.findIndex((s) => s.id === idea.anchor.id) + 1 : 0;
+      list.splice(at, 0, makeStep(idea.st.add));
+      commit();
+      toast('Added to your routine ✨');
+    },
+    'dismiss-tip'(id) { state.dismissedTips.push(id); commit(); },
+    'focus-start'(r) { openFocus(r || currentRoutine(new Date())); },
+    'focus-done'() { focusAdvance('full'); },
+    'focus-tiny'() { focusAdvance('tiny'); },
+    'focus-skip'() { focusAdvance(null); },
+    'focus-close'() { closeFocus(); },
     profile() {
-      if (ui.tab === 'settings') return;
+      if (isSubPage()) return;
       ui.showProfile = !ui.showProfile;
       render();
       window.scrollTo(0, 0);
@@ -990,13 +1645,7 @@
         toast('Selected. Copy it from your keyboard menu.');
       }
     },
-    'open-settings'() {
-      ui.prevTab = ui.tab;
-      ui.tab = 'settings';
-      ui.showProfile = false;
-      render();
-      window.scrollTo(0, 0);
-    },
+    'open-settings'() { openPage('settings'); },
     back() { ui.tab = ui.prevTab || 'today'; render(); window.scrollTo(0, 0); },
     theme(t) { state.theme = t; commit(); },
     'bg-floral'() { state.bg = Object.assign({}, state.bg, { type: 'floral' }); commit(); },
@@ -1023,7 +1672,9 @@
       affOrder = null;
       Object.assign(ui, {
         tab: 'today', edit: {}, showProfile: false, showFavs: false, editName: false, openDeposit: null, history: {},
+        routine: null, showTemplates: false,
       });
+      closeFocus();
       save();
       render();
       window.scrollTo(0, 0);
@@ -1113,6 +1764,14 @@
       window.scrollTo(0, 0);
       toast(`Welcome to Bloom, ${first || '@' + username} 🌸`);
     },
+    'add-step'(fd) {
+      const name = String(fd.get('sname') || '').trim();
+      if (!name) return;
+      state.routines[currentRoutine(new Date())].push({
+        id: uid(), name, emoji: fd.get('emoji') || '✨', tiny: String(fd.get('tiny') || '').trim(),
+      });
+      commit();
+    },
     'save-name'(fd) {
       state.name = String(fd.get('first') || '').trim().slice(0, 30);
       ui.editName = false;
@@ -1192,10 +1851,16 @@
     applyBackground();
   });
 
+  // Escape closes focus mode (unless a pop-up is open on top of it).
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && focus && !$('.dialog-backdrop')) closeFocus();
+  });
+
   // Refresh when coming back to the app (e.g. the next morning).
   document.addEventListener('visibilitychange', () => { if (!document.hidden) render(); });
 
   render();
+  checkMedals(); // awards anything already earned (e.g. streaks built before medals existed)
 
   // ---------- Offline support ----------
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {

@@ -324,6 +324,129 @@ button.item:active { transform: scale(.98); }
 .copy-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .email { flex: 1; min-width: 0; font-weight: 700; overflow-wrap: anywhere; user-select: all; -webkit-user-select: all; }
 
+/* Seeds: routines */
+.item.step { gap: 10px; }
+.step-body { flex: 1; min-width: 0; }
+.step-body b { display: block; font-weight: 600; overflow-wrap: anywhere; }
+.step-body span { display: block; margin-top: 2px; }
+.item.step.done .step-body b { color: var(--muted); text-decoration: line-through; }
+.tiny-btn { flex: none; padding: 6px 10px; font-size: 12px; background: var(--surface); }
+.tpls { display: flex; flex-direction: column; gap: 10px; }
+.tpl { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 14px; border-radius: 14px; background: var(--surface-2); }
+.tpl p { margin: 2px 0 0; }
+.tpl-steps { font-size: 20px; letter-spacing: 4px; }
+.tpl-link { display: block; margin: 12px 0 8px; padding-left: 0; }
+.stack-intro { margin: 0 0 12px; }
+.stack { padding: 12px 14px; border-radius: 14px; background: var(--surface-2); }
+.stack-line { margin: 0 0 4px; line-height: 1.45; }
+.stack p.small { margin: 0 0 10px; }
+.stack-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.tip { display: flex; gap: 8px; margin: 12px 0 0; font-size: 14px; line-height: 1.45; }
+
+/* Focus mode: a calm, full-screen view of one step */
+body.focusing { overflow: hidden; }
+.focus {
+  position: fixed;
+  inset: 0;
+  z-index: 25;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  background: var(--bg);
+  padding: calc(16px + env(safe-area-inset-top)) 16px calc(20px + env(safe-area-inset-bottom));
+}
+.focus > * { width: 100%; max-width: 480px; margin-left: auto; margin-right: auto; }
+.focus-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.focus-x { flex: none; width: 40px; height: 40px; border-radius: 50%; background: var(--surface-2); font-size: 22px; line-height: 1; }
+.focus-dots { display: flex; gap: 6px; margin-top: 14px; }
+.focus-dots span { flex: 1; height: 6px; border-radius: 99px; background: var(--surface-2); }
+.focus-dots .past { background: var(--accent); }
+.focus-dots .now { background: var(--accent-ink); }
+.focus-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 24px 0;
+  text-align: center;
+}
+.focus-emoji { font-size: 72px; line-height: 1; }
+.focus-name {
+  margin: 0;
+  font-family: ui-serif, "New York", Georgia, serif;
+  font-size: 32px;
+  line-height: 1.2;
+  text-wrap: balance;
+}
+.focus-tiny { margin: 0; max-width: 30em; color: var(--muted); font-size: 15px; line-height: 1.5; }
+.focus-tiny b { color: var(--text); }
+.focus-actions { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.focus-actions .btn { padding: 16px; font-size: 18px; }
+.block-chip { width: 100%; padding: 13px; font-size: 15px; font-weight: 700; }
+
+/* Medals: one ring color per flower stage */
+.medal {
+  --ring: #d4b29b;
+  width: 50px;
+  height: 50px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 24px;
+  line-height: 1;
+  background: var(--surface);
+  box-shadow: inset 0 0 0 3px var(--ring), 0 2px 8px rgba(90, 50, 40, .14);
+}
+.medal.t1 { --ring: #e8b4c2; }
+.medal.t2 { --ring: #d98aa1; }
+.medal.t3 { --ring: #b8607a; }
+.medal.t4 { --ring: #c99272; background: linear-gradient(135deg, #fbe3e8, #f3dccb); }
+.medal.locked { filter: grayscale(1); opacity: .4; box-shadow: inset 0 0 0 2px var(--check); }
+.medal.big {
+  width: 96px;
+  height: 96px;
+  margin: 0 auto 14px;
+  font-size: 46px;
+  box-shadow: inset 0 0 0 5px var(--ring), 0 8px 24px rgba(150, 70, 90, .22);
+}
+.medal-row { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; }
+.medal-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+}
+.medal-progress { margin: 14px 0 0; }
+.medal-next { margin: 6px 0 0; }
+.tier-key { margin: 10px 0 0; }
+.medal-card { text-align: center; }
+.medal-card h2 { margin: 6px 0 6px; font-size: 20px; }
+.medal-card p { margin: 0 0 10px; font-weight: 500; }
+.medal-card .aff-label { margin: 0; }
+
+.petal {
+  position: fixed;
+  top: -24px;
+  z-index: 31;
+  border-radius: 14px 0 14px 0;
+  pointer-events: none;
+  animation-name: petal-fall;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+@keyframes petal-fall {
+  to { transform: translate(var(--dx), 110vh) rotate(var(--rot)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .petal { display: none; }
+}
+
 /* "Are you sure?" box */
 .dialog-backdrop {
   position: fixed;

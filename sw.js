@@ -1,6 +1,6 @@
 // Keeps Bloom working offline. Network first so updates show up right away,
 // falling back to the cached copy when there's no connection.
-const CACHE = 'bloom-v13';
+const CACHE = 'bloom-v16';
 const ASSETS = [
   './',
   'index.html',
