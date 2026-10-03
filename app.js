@@ -51,6 +51,7 @@
       savings: [],    // { id, name, emoji, target, deadline, deposits: [{ id, amount, date }] }
       favAff: [],     // saved affirmation texts (with {name} placeholders)
       bg: { type: 'floral', color: 'blush', veil: 0.45 }, // background: 'floral' | 'solid' | 'photo'
+      theme: 'auto',  // 'auto' follows the phone, or 'light' / 'dark'
       // name: undefined until she answers the "what should we call you" prompt ('' = skipped)
       // affSeed: random number that gives each person her own affirmation order
     };
@@ -702,11 +703,36 @@
   try { bgPhoto = localStorage.getItem(PHOTO_KEY); } catch (e) { /* ignore */ }
   const darkMQ = window.matchMedia('(prefers-color-scheme: dark)');
 
+  const isDark = () => state.theme === 'dark' || (state.theme !== 'light' && darkMQ.matches);
+
+  // Light / dark / automatic. The CSS already has a palette for data-theme="light" and "dark".
+  function applyTheme() {
+    const root = document.documentElement;
+    const theme = state.theme || 'auto';
+    if (theme === 'auto') {
+      if (root.dataset.bloomTheme) { root.removeAttribute('data-theme'); delete root.dataset.bloomTheme; }
+    } else {
+      root.setAttribute('data-theme', theme);
+      root.dataset.bloomTheme = theme;
+    }
+    // Keep the phone's status bar color in step with the chosen look.
+    document.querySelectorAll('meta[name="theme-color"]').forEach((m) => {
+      if (m.dataset.media === undefined) { m.dataset.media = m.getAttribute('media') || ''; m.dataset.color = m.content; }
+      if (theme === 'auto') {
+        if (m.dataset.media) m.setAttribute('media', m.dataset.media);
+        m.content = m.dataset.color;
+      } else {
+        m.removeAttribute('media');
+        m.content = theme === 'dark' ? '#231a17' : '#fbf2ee';
+      }
+    });
+  }
+
   // Paints the chosen background behind everything. Dark mode adds a chocolate layer.
   function applyBackground() {
     const root = document.documentElement;
     const bg = state.bg || { type: 'floral' };
-    const dark = darkMQ.matches;
+    const dark = isDark();
     const layer = (rgb, a) => `linear-gradient(rgba(${rgb}, ${a}), rgba(${rgb}, ${a}))`;
     let value = null;
     if (bg.type === 'solid') {
@@ -751,8 +777,21 @@
   function viewSettings() {
     const bg = state.bg;
     const veilPct = Math.round((typeof bg.veil === 'number' ? bg.veil : 0.45) * 100);
+    const theme = state.theme || 'auto';
     return `
       <button class="back" data-click="back">‹ Back</button>
+
+      <section class="card">
+        <div class="card-h"><h2>Appearance</h2></div>
+        <div class="seg theme-seg" role="group" aria-label="Appearance">
+          <button data-click="theme" data-id="auto" aria-pressed="${theme === 'auto'}"><span aria-hidden="true">📱</span>Automatic</button>
+          <button data-click="theme" data-id="light" aria-pressed="${theme === 'light'}"><span aria-hidden="true">☀️</span>Light</button>
+          <button data-click="theme" data-id="dark" aria-pressed="${theme === 'dark'}"><span aria-hidden="true">🌙</span>Dark</button>
+        </div>
+        <p class="small muted theme-note">${theme === 'auto'
+          ? `Following your phone's setting (${darkMQ.matches ? 'dark' : 'light'} right now).`
+          : `Bloom will always look ${theme}, whatever your phone is set to.`}</p>
+      </section>
 
       <section class="card">
         <div class="card-h"><h2>Background</h2></div>
@@ -835,6 +874,7 @@
   function render() {
     const now = new Date();
     const welcome = !state.username;
+    applyTheme();
     applyBackground();
     document.body.classList.toggle('welcome', welcome);
     if (welcome) { $('#view').innerHTML = viewWelcome(); return; }
@@ -958,6 +998,7 @@
       window.scrollTo(0, 0);
     },
     back() { ui.tab = ui.prevTab || 'today'; render(); window.scrollTo(0, 0); },
+    theme(t) { state.theme = t; commit(); },
     'bg-floral'() { state.bg = Object.assign({}, state.bg, { type: 'floral' }); commit(); },
     'bg-photo'() { state.bg = Object.assign({}, state.bg, { type: 'photo' }); commit(); },
     'bg-color'(id) { state.bg = Object.assign({}, state.bg, { type: 'solid', color: id }); commit(); },
