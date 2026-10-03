@@ -569,6 +569,10 @@ body.welcome .top, body.welcome .tabs { display: none; }
 .form-error { margin: 10px 0 0; min-height: 0; color: var(--accent-ink); font-weight: 700; font-size: 14px; }
 .form-error:empty { display: none; }
 .w-note { margin: 12px 0 0; text-align: center; }
+.w-alt { display: block; margin: 12px auto 0; padding: 6px 4px; }
+.acct-line { margin: 0 0 6px; overflow-wrap: anywhere; }
+.acct-note { margin: 10px 0 12px; }
+.card .seg { margin-bottom: 16px; }
 
 /* Daily affirmation */
 .card.aff {

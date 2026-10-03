@@ -69,9 +69,30 @@
     return defaults();
   }
 
-  function save() {
+  // Writes to this device only (used when applying progress downloaded from the cloud).
+  function writeLocal() {
     try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { /* ignore */ }
   }
+
+  // Saves on this device, and queues an online save when she's signed in.
+  function save() {
+    writeLocal();
+    if (cloudOn() && session) {
+      syncMeta.dirty = true;
+      storeSyncMeta();
+      schedulePush();
+    }
+  }
+
+  // Cloud account state (see "Cloud accounts" below). Declared early because save() uses it.
+  const CLOUD = window.BLOOM_CLOUD || {};
+  const AUTH_KEY = 'bloom:auth';
+  const SYNC_KEY = 'bloom:sync';
+  let session = null;   // { access_token, refresh_token, expires_at, user: { id, email, meta } }
+  let syncMeta = { dirty: false, syncedAt: null };
+  let pushTimer = null;
+  try { session = JSON.parse(localStorage.getItem(AUTH_KEY)); } catch (e) { /* ignore */ }
+  try { syncMeta = Object.assign(syncMeta, JSON.parse(localStorage.getItem(SYNC_KEY))); } catch (e) { /* ignore */ }
 
   let state = load();
   if (!state.affSeed) { state.affSeed = Math.floor(Math.random() * 2147483646) + 1; save(); }
@@ -665,10 +686,319 @@
     toast.timer = setTimeout(() => t.classList.remove('show'), 3500);
   }
 
+  // ---------- Cloud accounts (Supabase) ----------
+  // Progress (everything except money) is saved online per account and synced between devices.
+  const LOCAL_ONLY = ['budgets', 'txns', 'savings']; // money never leaves the device
+  function cloudOn() { return !!(CLOUD.url && CLOUD.anonKey); } // a declaration, so save() can use it during startup
+  const siteUrl = () => location.origin + location.pathname;
+
+  function saveSession(s) {
+    session = s;
+    try {
+      if (s) localStorage.setItem(AUTH_KEY, JSON.stringify(s));
+      else localStorage.removeItem(AUTH_KEY);
+    } catch (e) { /* ignore */ }
+  }
+  function storeSyncMeta() { try { localStorage.setItem(SYNC_KEY, JSON.stringify(syncMeta)); } catch (e) { /* ignore */ } }
+
+  // Turns the service's messages into plain, friendly ones.
+  function friendlyError(err) {
+    const m = String((err && err.message) || '');
+    if (err && err.offline) return "Couldn't reach the internet. Check your connection and try again.";
+    if (/invalid login credentials/i.test(m)) return "That email and password don't match. Check them and try again.";
+    if (/already registered|already been registered/i.test(m)) return 'There’s already an account with that email. Try signing in instead.';
+    if (/email not confirmed/i.test(m)) return 'Please confirm your email first. Tap the link we sent you, then sign in.';
+    if (/password/i.test(m) && /6|characters|short|weak/i.test(m)) return 'Passwords need at least 6 characters.';
+    if (/rate limit|too many|429/i.test(m) || (err && err.status === 429)) return 'Too many tries. Please wait a few minutes and try again.';
+    if (err && err.code === '23505') return 'That username is already taken. Please choose another one.';
+    if (/valid email|email address/i.test(m)) return 'Please enter a valid email address.';
+    return m ? `Something went wrong: ${m}` : 'Something went wrong. Please try again.';
+  }
+
+  async function api(path, { method = 'GET', body, auth = false, headers = {} } = {}) {
+    const h = Object.assign({ apikey: CLOUD.anonKey, 'Content-Type': 'application/json' }, headers);
+    if (auth) {
+      await freshSession();
+      if (!session) { const e = new Error('Signed out'); e.signedOut = true; throw e; }
+      h.Authorization = `Bearer ${session.access_token}`;
+    } else if (CLOUD.anonKey.startsWith('eyJ')) {
+      h.Authorization = `Bearer ${CLOUD.anonKey}`; // classic "anon" keys also go here; newer "publishable" keys don't
+    }
+    let res;
+    try {
+      res = await fetch(CLOUD.url.replace(/\/$/, '') + path, { method, headers: h, body: body ? JSON.stringify(body) : undefined });
+    } catch (e) {
+      const err = new Error('offline');
+      err.offline = true;
+      throw err;
+    }
+    const text = await res.text();
+    let json = null;
+    try { json = text ? JSON.parse(text) : null; } catch (e) { /* not JSON */ }
+    if (!res.ok) {
+      const err = new Error((json && (json.msg || json.message || json.error_description || json.error)) || `Error ${res.status}`);
+      err.status = res.status;
+      err.code = json && (json.code || json.error_code);
+      throw err;
+    }
+    return json;
+  }
+
+  function storeAuth(json) {
+    const u = json.user || {};
+    saveSession({
+      access_token: json.access_token,
+      refresh_token: json.refresh_token,
+      expires_at: Date.now() + (Number(json.expires_in) || 3600) * 1000,
+      user: { id: u.id, email: u.email, meta: u.user_metadata || {} },
+    });
+  }
+
+  async function freshSession() {
+    if (!session || Date.now() < session.expires_at - 60000) return;
+    try {
+      storeAuth(await api('/auth/v1/token?grant_type=refresh_token', { method: 'POST', body: { refresh_token: session.refresh_token } }));
+    } catch (e) {
+      if (!e.offline) saveSession(null); // the login expired; she'll need to sign in again
+      throw e;
+    }
+  }
+
+  async function cloudFetch() {
+    const rows = await api(`/rest/v1/bloom_data?user_id=eq.${session.user.id}&select=username,data,updated_at`, { auth: true });
+    return (rows && rows[0]) || null;
+  }
+
+  function syncedPart() {
+    const d = {};
+    Object.keys(state).forEach((k) => { if (!LOCAL_ONLY.includes(k)) d[k] = state[k]; });
+    return d;
+  }
+
+  async function cloudPush() {
+    const updatedAt = new Date().toISOString();
+    await api('/rest/v1/bloom_data?on_conflict=user_id', {
+      method: 'POST',
+      auth: true,
+      headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+      body: { user_id: session.user.id, username: state.username, data: syncedPart(), updated_at: updatedAt },
+    });
+    syncMeta = { dirty: false, syncedAt: updatedAt };
+    storeSyncMeta();
+  }
+
+  // Replaces this device's progress with the online copy, keeping money (which only lives here).
+  function applyRemote(row) {
+    const keep = {};
+    LOCAL_ONLY.forEach((k) => { keep[k] = state[k]; });
+    state = Object.assign(defaults(), row.data || {}, keep);
+    state.username = row.username;
+    if (!state.affSeed) state.affSeed = Math.floor(Math.random() * 2147483646) + 1;
+    affOrder = null;
+    writeLocal();
+    syncMeta = { dirty: false, syncedAt: row.updated_at };
+    storeSyncMeta();
+  }
+
+  function schedulePush() {
+    clearTimeout(pushTimer);
+    pushTimer = setTimeout(pushNow, 2500);
+  }
+
+  async function pushNow() {
+    clearTimeout(pushTimer);
+    if (!cloudOn() || !session || !state.username) return;
+    ui.sync = 'saving';
+    updateSyncLabel();
+    try {
+      await cloudPush();
+      ui.sync = 'saved';
+    } catch (e) {
+      ui.sync = e.offline ? 'offline' : e.signedOut ? 'signedout' : 'error';
+    }
+    updateSyncLabel();
+  }
+
+  // On open (and when she comes back to the app): download newer progress, or upload unsaved changes.
+  async function cloudSync() {
+    if (!cloudOn() || !session || !state.username) return;
+    try {
+      const row = await cloudFetch();
+      if (!row || syncMeta.dirty) await pushNow();
+      else if (row.updated_at !== syncMeta.syncedAt) {
+        applyRemote(row);
+        render();
+        ui.sync = 'saved';
+      } else ui.sync = 'saved';
+    } catch (e) {
+      ui.sync = e.offline ? 'offline' : e.signedOut ? 'signedout' : 'error';
+    }
+    updateSyncLabel();
+  }
+
+  // After any sign-in: load her online progress, or create it from this device's progress.
+  async function afterSignIn() {
+    const row = await cloudFetch();
+    if (row) {
+      if (state.username && !(await ask('This device already has progress. Replace it with your online progress? Money on this device stays as it is.', 'Use online progress'))) {
+        saveSession(null);
+        toast('Not signed in. This device keeps its own progress.');
+        render();
+        return false;
+      }
+      applyRemote(row);
+    } else {
+      const meta = session.user.meta || {};
+      if (!state.username) {
+        state.username = meta.username || (session.user.email || 'bloomer').split('@')[0].replace(/[^A-Za-z0-9._]/g, '').slice(0, 20) || 'bloomer';
+        state.name = meta.first_name || '';
+      }
+      writeLocal();
+      await cloudPush();
+    }
+    ui.sync = 'saved';
+    ui.welcomeMode = null;
+    ui.cloudPanel = null;
+    render();
+    return true;
+  }
+
+  // Handles the links in Supabase emails (confirm email, reset password).
+  async function handleAuthRedirect() {
+    if (!cloudOn() || !location.hash || location.hash.length < 2) return;
+    const p = new URLSearchParams(location.hash.slice(1));
+    const clearHash = () => history.replaceState(null, '', location.pathname + location.search);
+    if (p.get('error_description')) {
+      clearHash();
+      toast(`That link didn't work: ${p.get('error_description')}. Try again from the sign-in page.`);
+      return;
+    }
+    const token = p.get('access_token');
+    if (!token) return;
+    clearHash();
+    try {
+      const res = await fetch(`${CLOUD.url.replace(/\/$/, '')}/auth/v1/user`, { headers: { apikey: CLOUD.anonKey, Authorization: `Bearer ${token}` } });
+      if (!res.ok) throw new Error('bad link');
+      const user = await res.json();
+      storeAuth({ access_token: token, refresh_token: p.get('refresh_token'), expires_in: p.get('expires_in'), user });
+      if (p.get('type') === 'recovery') {
+        ui.recovery = true;
+        render();
+      } else if (await afterSignIn()) {
+        toast('Email confirmed. Welcome to Bloom 🌸');
+      }
+    } catch (e) {
+      toast("That link didn't work. Try signing in instead.");
+    }
+  }
+
+  const ago = (iso) => {
+    if (!iso) return '';
+    const s = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
+    if (s < 60) return 'just now';
+    if (s < 3600) return `${Math.round(s / 60)} min ago`;
+    return new Date(iso).toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+  };
+  function syncText() {
+    switch (ui.sync) {
+      case 'saving': return 'Saving…';
+      case 'offline': return 'You’re offline. Changes will save when you’re back online.';
+      case 'error': return 'Couldn’t save just now. Bloom will try again soon.';
+      case 'signedout': return 'Your sign-in expired. Sign out and sign back in to keep saving online.';
+      default: return syncMeta.dirty ? 'Saving soon…' : `Saved online${syncMeta.syncedAt ? ` · ${ago(syncMeta.syncedAt)}` : ''}`;
+    }
+  }
+  function updateSyncLabel() {
+    const el = $('#sync-status');
+    if (el) el.textContent = syncText();
+  }
+
+  // Disables a form's button while something is loading, and shows errors under the form.
+  async function busy(form, label, fn) {
+    const btn = form.querySelector('button.btn');
+    const err = form.querySelector('.form-error');
+    const old = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = label;
+    if (err) err.textContent = '';
+    try {
+      await fn();
+    } catch (e) {
+      if (err) err.textContent = friendlyError(e);
+    } finally {
+      if (document.body.contains(btn)) { btn.disabled = false; btn.textContent = old; }
+    }
+  }
+  const formError = (form, msg) => { const el = form.querySelector('.form-error'); if (el) el.textContent = msg; };
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
   // ---------- Welcome & profile ----------
   const USERNAME_RE = /^[A-Za-z0-9._]{3,20}$/;
 
+  function welcomeForm() {
+    const mode = cloudOn() ? (ui.welcomeMode || 'signup') : 'local';
+    const err = '<p class="form-error" role="alert"></p>';
+    const tabs = `<div class="seg" role="group" aria-label="Account">
+        <button data-click="wmode" data-id="signup" aria-pressed="${mode === 'signup'}">Create account</button>
+        <button data-click="wmode" data-id="signin" aria-pressed="${mode === 'signin'}">Sign in</button>
+      </div>`;
+    const usernameField = `<label class="fld mb"><span>Create a username</span>
+        <span class="at-field"><input name="username" placeholder="e.g. mayablooms" maxlength="21" autocomplete="username" autocapitalize="none" spellcheck="false" required></span>
+      </label>`;
+    const firstField = `<label class="fld mb"><span>First name (optional)</span>
+        <input name="first" placeholder="Used in your daily affirmations" maxlength="30" autocomplete="given-name"></label>`;
+    const emailField = `<label class="fld mb"><span>Email</span>
+        <input name="email" type="email" inputmode="email" autocomplete="email" autocapitalize="none" spellcheck="false" required></label>`;
+    const passField = (auto) => `<label class="fld"><span>Password</span>
+        <input name="password" type="password" minlength="6" autocomplete="${auto}" required placeholder="At least 6 characters"></label>`;
+
+    if (mode === 'confirm') {
+      return `<h2 class="w-form-title">Check your email 💌</h2>
+        <p class="small">We sent a confirmation link to <b>${esc(ui.pendingEmail || 'your email')}</b>. Tap it to finish creating your account. It opens Bloom and signs you in.</p>
+        <button class="btn block" data-click="wmode" data-id="signin">I’ve confirmed. Sign in</button>`;
+    }
+    if (mode === 'forgot') {
+      return `<h2 class="w-form-title">Reset your password</h2>
+        <form data-submit="forgot" novalidate>${emailField}${err}<button class="btn block">Send reset link</button></form>
+        <button class="link w-alt" data-click="wmode" data-id="signin">Back to sign in</button>`;
+    }
+    if (mode === 'signin') {
+      return `${tabs}
+        <form data-submit="sign-in" novalidate>${emailField}${passField('current-password')}${err}<button class="btn block">Sign in</button></form>
+        <button class="link w-alt" data-click="wmode" data-id="forgot">Forgot password?</button>`;
+    }
+    if (mode === 'signup') {
+      return `${tabs}
+        <form data-submit="sign-up" novalidate>${usernameField}${firstField}${emailField}${passField('new-password')}${err}
+          <button class="btn block">Start blooming 🌸</button></form>
+        <p class="small muted w-note">Your progress saves online so you can use Bloom on any device. Money info stays private on your phone.</p>
+        <button class="link w-alt" data-click="wmode" data-id="local">Continue without an account</button>`;
+    }
+    return `<h2 class="w-form-title">Start your journey</h2>
+      <form data-submit="create-profile" novalidate>${usernameField}${firstField.replace(' mb', '')}${err}
+        <button class="btn block">Start blooming 🌸</button></form>
+      <p class="small muted w-note">Your username and progress are saved privately on this device.${cloudOn() ? ' You can create an account later in Settings.' : ''}</p>
+      ${cloudOn() ? '<button class="link w-alt" data-click="wmode" data-id="signup">Create an account instead</button>' : ''}`;
+  }
+
+  function viewNewPassword() {
+    return `
+      <div class="welcome-wrap">
+        <img class="welcome-logo" src="icons/icon.svg" alt="">
+        <section class="card">
+          <h2 class="w-form-title">Choose a new password</h2>
+          <form data-submit="new-password" novalidate>
+            <label class="fld"><span>New password</span>
+              <input name="password" type="password" minlength="6" autocomplete="new-password" required placeholder="At least 6 characters"></label>
+            <p class="form-error" role="alert"></p>
+            <button class="btn block">Save new password</button>
+          </form>
+        </section>
+      </div>`;
+  }
+
   function viewWelcome() {
+    if (ui.recovery) return viewNewPassword();
     return `
       <div class="welcome-wrap">
         <img class="welcome-logo" src="icons/icon.svg" alt="">
@@ -683,20 +1013,7 @@
           Welcome to Bloom, where you blossom into the fullest, most radiant version
           of you, one petal at a time.
         </p>
-        <section class="card">
-          <h2 class="w-form-title">Start your journey</h2>
-          <form data-submit="create-profile" novalidate>
-            <label class="fld mb"><span>Create a username</span>
-              <span class="at-field"><input name="username" placeholder="e.g. mayablooms" maxlength="21" autocomplete="username" autocapitalize="none" spellcheck="false" required></span>
-            </label>
-            <label class="fld"><span>First name (optional)</span>
-              <input name="first" placeholder="Used in your daily affirmations" maxlength="30" autocomplete="given-name">
-            </label>
-            <p class="form-error" id="w-error" role="alert"></p>
-            <button class="btn block">Start blooming 🌸</button>
-          </form>
-          <p class="small muted w-note">Your username and progress are saved privately on this device.</p>
-        </section>
+        <section class="card">${welcomeForm()}</section>
       </div>`;
   }
 
@@ -837,7 +1154,59 @@
         <input type="file" id="bg-file" accept="image/*" hidden>
       </section>
 
+      ${accountCard()}
+      ${backupCard()}
       ${profileCard(true)}`;
+  }
+
+  function accountCard() {
+    if (!cloudOn()) return '';
+    if (session) {
+      return `
+        <section class="card">
+          <div class="card-h"><h2>☁️ Online account</h2></div>
+          <p class="small acct-line">Signed in as <b>${esc(session.user.email || '')}</b></p>
+          <p class="small muted acct-line" id="sync-status" role="status">${syncText()}</p>
+          <div class="photo-actions"><button class="chip strong" data-click="sync-now">Save now</button></div>
+          <p class="small muted acct-note">Your habits, goals, workouts, routines, medals and settings are saved online. Money (budgets, spending and savings) stays only on this device.</p>
+        </section>`;
+    }
+    const signin = ui.cloudPanel === 'signin';
+    return `
+      <section class="card">
+        <div class="card-h"><h2>☁️ Save your progress online</h2></div>
+        <p class="small muted acct-note">Right now your progress lives only on this device. With an account, it's saved online, so you can get it back on a new phone or use Bloom on more than one device. Money stays only on this device.</p>
+        ${signin ? `
+          <form data-submit="cloud-signin" novalidate>
+            <label class="fld mb"><span>Email</span><input name="email" type="email" inputmode="email" autocomplete="email" autocapitalize="none" required></label>
+            <label class="fld"><span>Password</span><input name="password" type="password" autocomplete="current-password" required></label>
+            <p class="form-error" role="alert"></p>
+            <button class="btn block">Sign in</button>
+          </form>
+          <button class="link w-alt" data-click="cloud-panel" data-id="signup">I need to create an account</button>` : `
+          <form data-submit="cloud-signup" novalidate>
+            <label class="fld mb"><span>Username</span>
+              <span class="at-field"><input name="username" value="${esc(state.username)}" maxlength="21" autocapitalize="none" spellcheck="false" required></span></label>
+            <label class="fld mb"><span>Email</span><input name="email" type="email" inputmode="email" autocomplete="email" autocapitalize="none" required></label>
+            <label class="fld"><span>Password</span><input name="password" type="password" minlength="6" autocomplete="new-password" placeholder="At least 6 characters" required></label>
+            <p class="form-error" role="alert"></p>
+            <button class="btn block">Create account &amp; save my progress</button>
+          </form>
+          <button class="link w-alt" data-click="cloud-panel" data-id="signin">I already have an account</button>`}
+      </section>`;
+  }
+
+  function backupCard() {
+    return `
+      <section class="card">
+        <div class="card-h"><h2>💾 Backup file</h2></div>
+        <p class="small muted acct-note">Save a copy of everything, including money, as a file on your device. You can restore it here on any phone or computer.</p>
+        <div class="photo-actions">
+          <button class="chip strong" data-click="backup-download">Download backup</button>
+          <button class="chip" data-click="backup-restore">Restore from backup</button>
+        </div>
+        <input type="file" id="restore-file" accept="application/json,.json" hidden>
+      </section>`;
   }
 
   // Opens the tester's email app with a short feedback template.
@@ -877,7 +1246,9 @@
           </div>
           <a class="link" href="${esc(feedbackLink())}">Open my email app</a>
         </div>` : ''}
-        <p class="small muted">Your data is saved only on this device. Signing out erases it.</p>
+        <p class="small muted">${session
+          ? '☁️ Your progress is saved online. Money stays only on this device.'
+          : `Your data is saved only on this device. Signing out erases it.${cloudOn() ? ' Create an account in Settings to save it online.' : ''}`}</p>
       </section>`;
   }
 
@@ -1558,6 +1929,24 @@
       window.scrollTo(0, 0);
     },
     'open-medals'() { openPage('medals'); },
+
+    // Accounts & backups
+    wmode(mode) { ui.welcomeMode = mode; render(); },
+    'cloud-panel'(panel) { ui.cloudPanel = panel; render(); },
+    async 'sync-now'() { await pushNow(); toast(ui.sync === 'saved' ? 'Saved online ☁️' : syncText()); },
+    'backup-download'() {
+      const payload = { app: 'bloom', version: 1, exportedAt: new Date().toISOString(), state };
+      const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `bloom-backup-${state.username || 'me'}-${dkey(new Date())}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      toast('Backup saved to your downloads 💾');
+    },
+    'backup-restore'() { const input = $('#restore-file'); if (input) input.click(); },
     'open-week'() { ui.weekOffset = 0; openPage('week'); },
 
     // Seeds
@@ -1660,12 +2049,25 @@
       commit();
     },
     async 'sign-out'() {
-      if (!(await ask('Sign out? This erases all your Bloom data on this device: habits, goals, workouts, money and favorites.', 'Sign out'))) return;
+      const message = session
+        ? 'Sign out? Your progress is saved online, so you can sign back in any time. Money info is only stored on this device and will be erased from it.'
+        : 'Sign out? This erases all your Bloom data on this device: habits, goals, workouts, money and favorites.';
+      if (!(await ask(message, 'Sign out'))) return;
+      if (session) {
+        if (syncMeta.dirty) await pushNow(); // save any last changes first
+        try { await api('/auth/v1/logout', { method: 'POST', auth: true }); } catch (e) { /* signing out locally anyway */ }
+        saveSession(null);
+      }
+      clearTimeout(pushTimer);
+      syncMeta = { dirty: false, syncedAt: null };
       try {
         localStorage.removeItem(STORE_KEY);
         localStorage.removeItem(TAB_KEY);
         localStorage.removeItem(PHOTO_KEY);
+        localStorage.removeItem(SYNC_KEY);
       } catch (e) { /* ignore */ }
+      ui.welcomeMode = null;
+      ui.cloudPanel = null;
       bgPhoto = null;
       state = defaults();
       state.affSeed = Math.floor(Math.random() * 2147483646) + 1;
@@ -1749,10 +2151,104 @@
       });
       commit();
     },
-    'create-profile'(fd) {
+    async 'sign-up'(fd, form) {
+      const username = String(fd.get('username') || '').trim().replace(/^@/, '');
+      const first = String(fd.get('first') || '').trim().slice(0, 30);
+      const email = String(fd.get('email') || '').trim();
+      const password = String(fd.get('password') || '');
+      if (!USERNAME_RE.test(username)) return formError(form, 'Usernames are 3–20 characters: letters, numbers, dots or underscores (no spaces).');
+      if (!EMAIL_RE.test(email)) return formError(form, 'Please enter a valid email address.');
+      if (password.length < 6) return formError(form, 'Passwords need at least 6 characters.');
+      await busy(form, 'Creating your account…', async () => {
+        if (!(await api('/rest/v1/rpc/username_available', { method: 'POST', body: { name: username } }))) {
+          throw Object.assign(new Error('taken'), { code: '23505' });
+        }
+        const json = await api(`/auth/v1/signup?redirect_to=${encodeURIComponent(siteUrl())}`, {
+          method: 'POST', body: { email, password, data: { username, first_name: first } },
+        });
+        if (json && json.access_token) {
+          storeAuth(json);
+          state.username = username;
+          state.name = first;
+          await afterSignIn();
+          toast(`Welcome to Bloom, ${first || '@' + username} 🌸`);
+        } else {
+          ui.pendingEmail = email;
+          ui.welcomeMode = 'confirm';
+          render();
+        }
+      });
+    },
+    async 'sign-in'(fd, form) {
+      const email = String(fd.get('email') || '').trim();
+      const password = String(fd.get('password') || '');
+      if (!EMAIL_RE.test(email) || !password) return formError(form, 'Enter your email and password.');
+      await busy(form, 'Signing in…', async () => {
+        storeAuth(await api('/auth/v1/token?grant_type=password', { method: 'POST', body: { email, password } }));
+        if (await afterSignIn()) toast(`Welcome back${state.name ? `, ${state.name}` : ''} 🌸`);
+      });
+    },
+    async forgot(fd, form) {
+      const email = String(fd.get('email') || '').trim();
+      if (!EMAIL_RE.test(email)) return formError(form, 'Please enter a valid email address.');
+      await busy(form, 'Sending…', async () => {
+        await api(`/auth/v1/recover?redirect_to=${encodeURIComponent(siteUrl())}`, { method: 'POST', body: { email } });
+        ui.welcomeMode = 'signin';
+        render();
+        toast('If there’s an account for that email, a reset link is on its way 💌');
+      });
+    },
+    async 'new-password'(fd, form) {
+      const password = String(fd.get('password') || '');
+      if (password.length < 6) return formError(form, 'Passwords need at least 6 characters.');
+      await busy(form, 'Saving…', async () => {
+        await api('/auth/v1/user', { method: 'PUT', auth: true, body: { password } });
+        ui.recovery = false;
+        if (!state.username) await afterSignIn();
+        else render();
+        toast('Password updated 🌸');
+      });
+    },
+    async 'cloud-signup'(fd, form) {
+      const username = String(fd.get('username') || '').trim().replace(/^@/, '');
+      const email = String(fd.get('email') || '').trim();
+      const password = String(fd.get('password') || '');
+      if (!USERNAME_RE.test(username)) return formError(form, 'Usernames are 3–20 characters: letters, numbers, dots or underscores (no spaces).');
+      if (!EMAIL_RE.test(email)) return formError(form, 'Please enter a valid email address.');
+      if (password.length < 6) return formError(form, 'Passwords need at least 6 characters.');
+      await busy(form, 'Creating your account…', async () => {
+        if (!(await api('/rest/v1/rpc/username_available', { method: 'POST', body: { name: username } }))) {
+          throw Object.assign(new Error('taken'), { code: '23505' });
+        }
+        state.username = username;
+        writeLocal();
+        const json = await api(`/auth/v1/signup?redirect_to=${encodeURIComponent(siteUrl())}`, {
+          method: 'POST', body: { email, password, data: { username, first_name: state.name || '' } },
+        });
+        if (json && json.access_token) {
+          storeAuth(json);
+          await afterSignIn();
+          toast('Your progress is now saved online ☁️');
+        } else {
+          ui.cloudPanel = 'signin';
+          render();
+          toast(`Check ${email} for a confirmation link, then sign in here 💌`);
+        }
+      });
+    },
+    async 'cloud-signin'(fd, form) {
+      const email = String(fd.get('email') || '').trim();
+      const password = String(fd.get('password') || '');
+      if (!EMAIL_RE.test(email) || !password) return formError(form, 'Enter your email and password.');
+      await busy(form, 'Signing in…', async () => {
+        storeAuth(await api('/auth/v1/token?grant_type=password', { method: 'POST', body: { email, password } }));
+        if (await afterSignIn()) toast('Signed in. Your progress is saved online ☁️');
+      });
+    },
+    'create-profile'(fd, form) {
       const username = String(fd.get('username') || '').trim().replace(/^@/, '');
       if (!USERNAME_RE.test(username)) {
-        $('#w-error').textContent = 'Usernames are 3–20 characters: letters, numbers, dots or underscores (no spaces).';
+        formError(form, 'Usernames are 3–20 characters: letters, numbers, dots or underscores (no spaces).');
         return;
       }
       const first = String(fd.get('first') || '').trim().slice(0, 30);
@@ -1838,8 +2334,34 @@
     submits[form.dataset.submit](new FormData(form), form);
   });
 
+  async function restoreBackup(file) {
+    if (!file) return;
+    let data;
+    try {
+      data = JSON.parse(await file.text());
+    } catch (e) {
+      toast("That file isn't a Bloom backup.");
+      return;
+    }
+    const s = data && (data.state || data);
+    if (!s || typeof s !== 'object' || !(s.username || Array.isArray(s.habits))) {
+      toast("That file isn't a Bloom backup.");
+      return;
+    }
+    const when = data.exportedAt ? ` from ${new Date(data.exportedAt).toLocaleDateString()}` : '';
+    if (!(await ask(`Replace everything on this device with this backup${when}?`, 'Restore'))) return;
+    const keepName = session ? state.username : null; // stay on the signed-in account
+    state = Object.assign(defaults(), s);
+    if (keepName) state.username = keepName;
+    if (!state.affSeed) state.affSeed = Math.floor(Math.random() * 2147483646) + 1;
+    affOrder = null;
+    commit();
+    toast('Backup restored 🌸');
+  }
+
   document.addEventListener('change', (e) => {
     if (e.target.id === 'bg-file') usePhoto(e.target.files[0]);
+    if (e.target.id === 'restore-file') { restoreBackup(e.target.files[0]); e.target.value = ''; }
     if (e.target.id === 'veil') save();
   });
 
@@ -1857,10 +2379,16 @@
   });
 
   // Refresh when coming back to the app (e.g. the next morning).
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) render(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { if (syncMeta.dirty) pushNow(); return; } // save before the app goes to sleep
+    render();
+    cloudSync();
+  });
+  window.addEventListener('online', () => cloudSync());
 
   render();
   checkMedals(); // awards anything already earned (e.g. streaks built before medals existed)
+  handleAuthRedirect().then(() => cloudSync());
 
   // ---------- Offline support ----------
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
